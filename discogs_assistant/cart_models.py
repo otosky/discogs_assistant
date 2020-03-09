@@ -1066,8 +1066,8 @@ class KnapsackTools:
         data = data.merge(candidates, on='release_id')
         data['quantity'] = 1
         # preprocess price column
-        currency_remover = re.compile(r'[^\d.]+')
-        data.loc[:,'price'] = data.price.apply(lambda x: currency_remover.sub('', x)).astype(float)
+        # currency_remover = re.compile(r'[^\d.]+')
+        # data.loc[:,'price'] = data.price.apply(lambda x: currency_remover.sub('', x)).astype(float)
 
         ## FILTER ITEMS FOR USER-CRITERIA:
         # filter out items above max_total_cart threshold
