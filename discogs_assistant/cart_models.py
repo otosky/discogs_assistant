@@ -1004,7 +1004,7 @@ class KnapsackTools:
         return final_options.iloc[:top_n_carts].reset_index(drop=True)
 
     @staticmethod
-    def setup_candidates_df(candidates, budget, criteria):
+    def setup_candidates_df(candidates, budget, criteria, day):
         '''
         Sets up DataFrame of candidate market listings given a list of release ids
         and cart criteria.
@@ -1018,6 +1018,8 @@ class KnapsackTools:
             criteria (dictionary):
                 Cart criteria for user's cart request.  Must have fields: "country",
                 "min_media_cond", "seller_rating".
+            day (datetime.datetime.date):
+                Date to use for currency conversion.
 
         Returns:
             pandas.DataFrame:
@@ -1030,13 +1032,25 @@ class KnapsackTools:
         # query db and get all listings; dump into pandas
         conn = connect_psql()
         q = '''
-        SELECT release_id, listing_id, media_cond_num, sleeve_cond,
-               seller_id, seller_rating, price, country, cart_url
-        FROM market_listings l
+        SELECT
+            release_id, listing_id, media_cond_num, sleeve_cond,
+            seller_id, seller_rating, 
+            price AS orig_price, 
+            ROUND((price::NUMERIC / b.exch_rate_eur * t.exch_rate_eur), 2) AS price,
+            currency AS orig_currency, t.currency_symbol AS target_currency,
+            country, cart_url
+        FROM
+            market_listings ml
         LEFT JOIN media_cond_grades mcg
-        ON l.media_cond = mcg.media_cond_str
-        WHERE release_id IN %s AND 
-            country=%s AND 
+        ON ml.media_cond = mcg.media_cond_str
+        INNER JOIN currency_conversion b 
+        ON ml.currency = b.currency_symbol AND
+            b.date = %s
+        INNER JOIN currency_conversion t
+        ON t.currency_abbr = %s AND
+            d.date = %s
+        WHERE release_id in %s AND 
+            country in %s AND 
             media_cond_num >= %s;
         '''
         # TODO 
@@ -1044,8 +1058,10 @@ class KnapsackTools:
         media_cond = criteria['min_media_cond']
         media_cond = MEDIA_COND_DICT[media_cond]
         min_seller_rating = int(criteria['seller_rating'])
+        currency = criteria['currency']
 
-        params = (tuple(candidates['release_id'].tolist()), country, media_cond)
+        params = (day, currency, day, tuple(candidates['release_id'].tolist()), 
+                  country, media_cond)
         data = pd.read_sql_query(q, conn, params=params)
         data = data.merge(candidates, on='release_id')
         data['quantity'] = 1
@@ -1064,7 +1080,7 @@ class KnapsackTools:
         return data
 
     @staticmethod
-    def get_listing_release_info(listing_ids):
+    def get_listing_release_info(listing_ids, currency, day):
         '''
         Fetches release metadata for Discogs market listings.
 
@@ -1080,8 +1096,12 @@ class KnapsackTools:
         '''
         # TODO add label id if you can figure out how normalized that table is (label)
         q = '''
-            SELECT ml.listing_id, r.id release_id, im.filename image_file, artist_id, 
-                a.name artist, title, label, price, media_cond
+            SELECT 
+                ml.listing_id, r.id release_id, im.filename image_file, artist_id, 
+                a.name artist, title, label, media_cond,
+                price, currency,
+                ROUND((price::NUMERIC / b.exch_rate_eur * t.exch_rate_eur), 2) AS adj_price,
+                t.currency_symbol AS target_currency
             FROM market_listings ml
             JOIN release r
                 ON ml.release_id = r.id
@@ -1093,9 +1113,15 @@ class KnapsackTools:
                 ON rl.release_id = r.id
             LEFT JOIN artist a
                 ON a.id = ra.artist_id
+            INNER JOIN currency_conversion b 
+            ON ml.currency = b.currency_symbol AND
+                b.date = %s
+            INNER JOIN currency_conversion t
+            ON t.currency_abbr = %s AND
+                d.date = %s
             WHERE ml.listing_id IN %s;
             '''
-        params = (tuple(listing_ids),)
+        params = (day, currency, day, tuple(listing_ids))
         with connect_psql() as conn:
             release_info = pd.read_sql_query(q, conn, params=params)
             # drop duplicates because some releases will have multiple artists/labels
