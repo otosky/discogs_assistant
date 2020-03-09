@@ -1048,7 +1048,7 @@ class KnapsackTools:
             b.date = %s
         INNER JOIN currency_conversion t
         ON t.currency_abbr = %s AND
-            d.date = %s
+            t.date = %s
         WHERE release_id in %s AND 
             country in %s AND 
             media_cond_num >= %s;
@@ -1118,7 +1118,7 @@ class KnapsackTools:
                 b.date = %s
             INNER JOIN currency_conversion t
             ON t.currency_abbr = %s AND
-                d.date = %s
+                t.date = %s
             WHERE ml.listing_id IN %s;
             '''
         params = (day, currency, day, tuple(listing_ids))
