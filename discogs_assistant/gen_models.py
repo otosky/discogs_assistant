@@ -508,7 +508,7 @@ class UserProfileBase:
                 cur.execute(q, insert_values)
         conn.close() 
 
-    def dump_interactions_to_SQL(self, release_ids, interaction_type='wantlist'):
+    def dump_interactions_to_SQL(self, release_ids, interaction_type='wantlist', non_user=False):
         '''
         Upserts release_ids of wantlist/collection for User to database.
 
@@ -517,6 +517,8 @@ class UserProfileBase:
                 List of release ids (integers) for given user's interactions.
             interaction_type (str):
                 Either "wantlist" or "collection".
+            non-user (boolean):
+                Whether user is not yet registered on Discogs Assistant.
 
         Returns:
             datatype:
@@ -525,6 +527,9 @@ class UserProfileBase:
         if interaction_type not in ['wantlist', 'collection']:
             raise TypeError("interaction_type parameter must be 'wantlist' or 'collection'")
         
+        if non_user:
+            interaction_type = f'non_user_{interaction_type}'
+
         today = datetime.utcnow().date()
         
         insert_values = [(r, self.username, today) for r in release_ids]

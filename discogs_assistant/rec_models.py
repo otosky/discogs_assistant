@@ -49,7 +49,7 @@ class ProfileGatheringDispatcher:
         return int(count)
 
     @staticmethod
-    def trigger_scrapers(chunks, username, n_chunks, interaction, trans_id):
+    def trigger_scrapers(chunks, username, n_chunks, interaction, trans_id, online=True):
         '''
         Triggers Cloud Function scrapers to extract release ids from User's
         collection or wantlist urls.  Urls are batched in chunks of size n, if there
@@ -86,7 +86,8 @@ class ProfileGatheringDispatcher:
                                         trans_id=trans_id, status=str(3))
             print(future.result())
             print('Published messages.')
-        Cache.update_transaction_status(trans_id, status=str(3))
+        if online:
+            Cache.update_transaction_status(trans_id, status=str(3))
     
     @staticmethod
     def trigger_api_profile_collection(username, interaction, trans_id):
@@ -203,7 +204,7 @@ class ProfileGatheringDispatcher:
         return None
 
     @classmethod
-    def scrape_extra_urls(cls, profile, trans_id, len_interactions, interaction_type):
+    def scrape_extra_urls(cls, profile, trans_id, len_interactions, interaction_type, online=True):
         '''
         Generates extra urls for interaction_type to scrape (beyond page 1)
         and triggers cloud functions to execute scraping.
@@ -229,12 +230,13 @@ class ProfileGatheringDispatcher:
         n_chunks = len(chunks)
         packet_size = n_chunks
         # publish msg to scrape extra wantlist URLs
-        cls.trigger_scrapers(chunks, profile.username, n_chunks, interaction_type, trans_id)
+        cls.trigger_scrapers(chunks, profile.username, n_chunks, interaction_type, 
+                             trans_id, online)
         print('triggering scrapers')
         return packet_size
 
     @classmethod
-    def dispatch(cls, username, trans_id, existing=False, interaction_type='wantlist'):
+    def dispatch(cls, username, trans_id, existing=False, interaction_type='wantlist', online=True):
         '''
         Dispatch pipeline to gather User's Discogs profile.
 
@@ -278,7 +280,8 @@ class ProfileGatheringDispatcher:
                         len_interactions = len_interactions - our_count
                         # chunk and trigger scrapers
                         packet_size = cls.scrape_extra_urls(profile, trans_id, 
-                                                        len_interactions, interaction_type)
+                                                            len_interactions, 
+                                                            interaction_type, online)
                         return packet_size
                     else:
                         # no packets needed
