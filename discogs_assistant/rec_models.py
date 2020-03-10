@@ -267,9 +267,15 @@ class ProfileGatheringDispatcher:
         if xml_tree:
             len_interactions, first250_releases = profile.get_interactions_len(xml_tree)
             if len_interactions:
-                # dump to Postgres
-                profile.dump_interactions_to_SQL(first250_releases, interaction_type=interaction_type)
-                # TODO if len is > 5000: send msg alerting that this might take a while 
+                if online:
+                    # dump to Postgres
+                    profile.dump_interactions_to_SQL(first250_releases, interaction_type=interaction_type)
+                else:
+                    # dump to Postgres
+                    profile.dump_interactions_to_SQL(first250_releases, 
+                                                     interaction_type=interaction_type, 
+                                                     non_user=True)
+                    # TODO if len is > 5000: send msg alerting that this might take a while
                 
                 # checks to see if count from our database matches Discogs web
                 if existing:
@@ -288,7 +294,7 @@ class ProfileGatheringDispatcher:
                         return 0
                 else:
                     packet_size = cls.scrape_extra_urls(profile, trans_id, 
-                                                    len_interactions, interaction_type)
+                                                    len_interactions, interaction_type, online)
                     return packet_size
         # private profile
         else:
