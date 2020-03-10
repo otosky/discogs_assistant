@@ -1162,7 +1162,7 @@ class KnapsackTools:
         return seller_info.to_dict('index')
 
     @classmethod
-    def knapsack_pipeline(cls, candidates_df, budget, min_qty, weight_func=WEIGHT_FUNC, top_n=20):
+    def knapsack_pipeline(cls, candidates_df, budget, min_qty, currency, weight_func=WEIGHT_FUNC, top_n=20):
         '''
         Pipeline to get top-N optimized shopping carts.
         
@@ -1211,5 +1211,6 @@ class KnapsackTools:
         top_carts = cls.reassemble_cart_options(grouped_carts_sellers, 
                                             all_knapsacks, budget, min_qty, top_n_carts=top_n)
         top_carts['rank'] = top_carts.index + 1
+        top_carts['target_currency'] = currency
         
         return top_carts
