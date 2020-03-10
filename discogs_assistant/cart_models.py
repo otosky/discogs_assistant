@@ -1054,7 +1054,7 @@ class KnapsackTools:
             media_cond_num >= %s;
         '''
         # TODO 
-        country = criteria['country']
+        country = tuple(criteria['country'],)
         media_cond = criteria['min_media_cond']
         media_cond = MEDIA_COND_DICT[media_cond]
         min_seller_rating = int(criteria['seller_rating'])
