@@ -35,7 +35,7 @@ class MongoCollection:
     def __exit__(self, exc_type, exc_value, exc_traceback):
         self.client.close()
 
-def connect_psql():
+def connect_psql(ssl=False):
     '''
     Connects to Postgres with Discogs environment variables.
 
@@ -53,9 +53,11 @@ def connect_psql():
     rootcert = os.environ.get('PSQL_ROOT_CERT')
 
     # connect
-    conn = psycopg2.connect(host=host, user=user, password=pwd, dbname=dbname,
-                            sslcert=sslcert, sslrootcert=rootcert,
-                            sslkey=sslkey, sslmode='verify-ca')
+    conn = conn = psycopg2.connect(host=host, user=user, password=pwd, dbname=dbname)
+    if ssl:
+        conn = psycopg2.connect(host=host, user=user, password=pwd, dbname=dbname,
+                                sslcert=sslcert, sslrootcert=rootcert,
+                                sslkey=sslkey, sslmode='verify-ca')
     return conn
 
 def get_pickle_directory():
