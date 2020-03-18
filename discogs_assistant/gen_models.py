@@ -196,6 +196,7 @@ class Interactions:
 
     def create_df_interactions(self, psql_conn=None):
         # TODO remove psql_conn param in affected code
+        # TODO optimize this - queries are WAY slow; maybe move to Parquet
         '''
         Fetches a all users' Wantlist and Collection release_ids from database. 
         
@@ -206,11 +207,22 @@ class Interactions:
         
         with connect_psql() as conn:
             # gather all users' wantlists, assign each a score of 1
-            q = 'SELECT release_id, username FROM wantlist;'
+            q = '''
+            SELECT release_id, username 
+            FROM wantlist
+            UNION
+            SELECT release_id, username
+            FROM non_user_wantlist;
+            '''
             wantlists = pd.read_sql_query(q, conn)
             wantlists['score'] = 1
             # gather all users' collection, assign each a score of 2
-            q = 'SELECT release_id, username FROM collection;'
+            q = '''
+            SELECT release_id, username 
+            FROM collection
+            UNION
+            SELECT release_id, username
+            FROM non_user_collection;'''
             collection = pd.read_sql_query(q, conn)
             collection['score'] = 2
         conn.close()
