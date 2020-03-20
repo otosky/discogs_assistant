@@ -99,7 +99,7 @@ class LoggerFrontEnd(GeneralLogger):
         format_['service'] = service
 
         format_ = json.dumps(format_)
-        self.logger.log_struct(json.loads(format_))
+        self.logger.log_struct(json.loads(format_), resource=self.resource)
 
     def log_session(self, cookie, ip):
         
@@ -109,7 +109,7 @@ class LoggerFrontEnd(GeneralLogger):
         format_['ip'] = ip
 
         format_ = json.dumps(format_)
-        self.logger.log_struct(json.loads(format_))
+        self.logger.log_struct(json.loads(format_), resource=self.resource)
 
     def log_click_event(self, click_type, item_id):
         
@@ -119,7 +119,7 @@ class LoggerFrontEnd(GeneralLogger):
         format_['item_id'] = item_id
 
         format_ = json.dumps(format_)
-        self.logger.log_struct(json.loads(format_))
+        self.logger.log_struct(json.loads(format_), resource=self.resource)
 
     def log_paginated_view(self, page_num, release_ids):
         
@@ -129,4 +129,4 @@ class LoggerFrontEnd(GeneralLogger):
         format_['release_ids_seen'] = release_ids
         
         format_ = json.dumps(format_)
-        self.logger.log_struct(json.loads(format_))
+        self.logger.log_struct(json.loads(format_), resource=self.resource)
