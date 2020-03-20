@@ -862,6 +862,7 @@ class RecalcUser:
         meta_df = meta_df.drop_duplicates(subset='release_id')
         full_recommendations = map_.merge(meta_df)
 
+        full_recommendations['artist'] = full_recommendations['artist'].fillna('Various')
         full_recommendations['rank'] = full_recommendations.index + 1
         #full_recommendations['score'] = scores
         self.recommendations = full_recommendations

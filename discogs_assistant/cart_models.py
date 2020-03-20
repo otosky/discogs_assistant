@@ -1126,7 +1126,8 @@ class KnapsackTools:
             release_info = pd.read_sql_query(q, conn, params=params)
             # drop duplicates because some releases will have multiple artists/labels
             release_info = release_info.drop_duplicates(subset='listing_id')
-            release_info = release_info.set_index('listing_id', drop=True) 
+            release_info = release_info.set_index('listing_id', drop=True)
+            release_info['artist'] = release_info['artist'].fillna('Various')
             release_info['listing_id'] = release_info.index
         return release_info.to_dict('index')
 
