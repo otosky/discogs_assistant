@@ -16,6 +16,13 @@ logging_resource = Resource(type=GCP_LOG_RESOURCE_TYPE,
                                 'zone': GCP_INSTANCE_ZONE
                             })
 
+gae_logging_resource = Resource(type='gae_app',
+                                labels = {
+                                    'module_id': os.environ.get('GAE_SERVICE'),
+                                    'project_id': os.environ.get('GOOGLE_CLOUD_PROJECT'),
+                                    'version_id': os.environ.get('GAE_VERSION')
+                                })
+
 class GeneralLogger():
 
     def __init__(self, resource):
@@ -93,11 +100,12 @@ class LoggerFrontEnd(GeneralLogger):
         format_ = json.dumps(format_)
         self.logger.log_struct(json.loads(format_), resource=self.resource)
 
-    def log_session(self, cookie):
+    def log_session(self, cookie, ip):
         
         format_ = self._set_base_format()
         format_['event_type'] = 'session_start'
         format_['cookie'] = cookie
+        format_['ip'] = ip
 
         format_ = json.dumps(format_)
         self.logger.log_struct(json.loads(format_), resource=self.resource)
