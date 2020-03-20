@@ -121,12 +121,15 @@ class LoggerFrontEnd(GeneralLogger):
         format_ = json.dumps(format_)
         self.logger.log_struct(json.loads(format_), resource=self.resource)
 
-    def log_paginated_view(self, page_num, release_ids):
+    def log_paginated_view(self, page_num, data, service):
         
         format_ = self._set_base_format()
         format_['event_type'] = 'pagination_click'
         format_['page_num'] = page_num
-        format_['release_ids_seen'] = release_ids
+        if service == 'recommendations':
+            format_['release_ids_seen'] = data
+        elif service == 'carts'
+            format_['cart'] = data
         
         format_ = json.dumps(format_)
         self.logger.log_struct(json.loads(format_), resource=self.resource)
