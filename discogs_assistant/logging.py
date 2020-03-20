@@ -26,7 +26,7 @@ logging_resource = Resource(type=GCP_LOG_RESOURCE_TYPE,
 
 class GeneralLogger():
 
-    def __init__(self, resource):
+    def __init__(self, resource=None):
         client = google.cloud.logging.Client()
         self.client = client
         self.client.setup_logging()
@@ -79,9 +79,10 @@ class LoggerBackend(GeneralLogger):
 
 class LoggerFrontEnd(GeneralLogger):
 
-    def __init__(self, username):
+    def __init__(self, ,username):
         self.user = username
         self.default_level = 'INFO'
+        super().__init__()
 
     def _set_base_format(self):
         
