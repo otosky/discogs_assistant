@@ -71,6 +71,53 @@ class LoggerBackend(GeneralLogger):
 
 class LoggerFrontEnd(GeneralLogger):
 
-    def __init__(self, username):
+    def __init__(self, resource, username):
         self.user = username
-        super().__init__()
+        self.default_level = 'INFO'
+        super().__init__(resource)
+
+    def _set_base_format(self):
+        
+        format_ = {
+            'user': self.user,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        return format_
+
+    def log_service_request(self, service):
+        
+        format_ = self._set_base_format()
+        format_['event_type'] = 'service_request'
+        format_['service'] = service
+
+        format_ = json.dumps(format_)
+        self.logger.log_struct(json.loads(format_), resource=self.resource)
+
+    def log_session(self, cookie):
+        
+        format_ = self._set_base_format()
+        format_['event_type'] = 'session_start'
+        format_['cookie'] = cookie
+
+        format_ = json.dumps(format_)
+        self.logger.log_struct(json.loads(format_), resource=self.resource)
+
+    def log_click_event(self, click_type, item_id):
+        
+        format_ = self._set_base_format()
+        format_['event_type'] = 'external_link'
+        format_['click_type'] = click_type
+        format_['item_id'] = item_id
+
+        format_ = json.dumps(format_)
+        self.logger.log_struct(json.loads(format_), resource=self.resource)
+
+    def log_paginated_view(self, page_num, release_ids):
+        
+        format_ = self._set_base_format()
+        format_['event_type'] = 'pagination_click'
+        format_['page_num'] = page_num
+        format_['release_ids_seen'] = release_ids
+        
+        format_ = json.dumps(format_)
+        self.logger.log_struct(json.loads(format_), resource=self.resource)
