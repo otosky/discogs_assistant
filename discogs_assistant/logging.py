@@ -128,7 +128,7 @@ class LoggerFrontEnd(GeneralLogger):
         format_['page_num'] = page_num
         if service == 'recommendations':
             format_['release_ids_seen'] = data
-        elif service == 'carts'
+        elif service == 'carts':
             format_['cart'] = data
         
         format_ = json.dumps(format_)
