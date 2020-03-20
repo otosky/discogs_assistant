@@ -16,17 +16,17 @@ logging_resource = Resource(type=GCP_LOG_RESOURCE_TYPE,
                                 'zone': GCP_INSTANCE_ZONE
                             })
 
-# gae_logging_resource = Resource(type='gae_app',
-#                                 labels = {
-#                                     'module_id': os.environ.get('GAE_SERVICE'),
-#                                     'project_id': os.environ.get('GOOGLE_CLOUD_PROJECT'),
-#                                     'version_id': os.environ.get('GAE_VERSION'),
-#                                     'zone': os.environ.get('')
-#                                 })
+gae_logging_resource = Resource(type='gae_app',
+                                labels = {
+                                    'module_id': os.environ.get('GAE_SERVICE'),
+                                    'project_id': os.environ.get('GOOGLE_CLOUD_PROJECT'),
+                                    'version_id': os.environ.get('GAE_VERSION'),
+                                    'zone': os.environ.get('')
+                                })
 
 class GeneralLogger():
 
-    def __init__(self, resource=None):
+    def __init__(self, resource):
         client = google.cloud.logging.Client()
         self.client = client
         self.client.setup_logging()
@@ -79,10 +79,10 @@ class LoggerBackend(GeneralLogger):
 
 class LoggerFrontEnd(GeneralLogger):
 
-    def __init__(self, username):
+    def __init__(self, resource, username):
         self.user = username
         self.default_level = 'INFO'
-        super().__init__()
+        super().__init__(resource)
 
     def _set_base_format(self):
         
