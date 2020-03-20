@@ -21,7 +21,7 @@ gae_logging_resource = Resource(type='gae_app',
                                     'module_id': os.environ.get('GAE_SERVICE'),
                                     'project_id': os.environ.get('GOOGLE_CLOUD_PROJECT'),
                                     'version_id': os.environ.get('GAE_VERSION'),
-                                    'zone': os.environ.get('')
+                                    'zone': os.environ.get('GAE_ZONE', 'na')
                                 })
 
 class GeneralLogger():
