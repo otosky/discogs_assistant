@@ -79,7 +79,7 @@ class LoggerBackend(GeneralLogger):
 
 class LoggerFrontEnd(GeneralLogger):
 
-    def __init__(self, ,username):
+    def __init__(self, username):
         self.user = username
         self.default_level = 'INFO'
         super().__init__()
