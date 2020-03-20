@@ -16,12 +16,13 @@ logging_resource = Resource(type=GCP_LOG_RESOURCE_TYPE,
                                 'zone': GCP_INSTANCE_ZONE
                             })
 
-gae_logging_resource = Resource(type='gae_app',
-                                labels = {
-                                    'module_id': os.environ.get('GAE_SERVICE'),
-                                    'project_id': os.environ.get('GOOGLE_CLOUD_PROJECT'),
-                                    'version_id': os.environ.get('GAE_VERSION')
-                                })
+# gae_logging_resource = Resource(type='gae_app',
+#                                 labels = {
+#                                     'module_id': os.environ.get('GAE_SERVICE'),
+#                                     'project_id': os.environ.get('GOOGLE_CLOUD_PROJECT'),
+#                                     'version_id': os.environ.get('GAE_VERSION'),
+#                                     'zone': os.environ.get('')
+#                                 })
 
 class GeneralLogger():
 
@@ -78,10 +79,9 @@ class LoggerBackend(GeneralLogger):
 
 class LoggerFrontEnd(GeneralLogger):
 
-    def __init__(self, resource, username):
+    def __init__(self, username):
         self.user = username
         self.default_level = 'INFO'
-        super().__init__(resource)
 
     def _set_base_format(self):
         
@@ -98,7 +98,7 @@ class LoggerFrontEnd(GeneralLogger):
         format_['service'] = service
 
         format_ = json.dumps(format_)
-        self.logger.log_struct(json.loads(format_), resource=self.resource)
+        self.logger.log_struct(json.loads(format_))
 
     def log_session(self, cookie, ip):
         
@@ -108,7 +108,7 @@ class LoggerFrontEnd(GeneralLogger):
         format_['ip'] = ip
 
         format_ = json.dumps(format_)
-        self.logger.log_struct(json.loads(format_), resource=self.resource)
+        self.logger.log_struct(json.loads(format_))
 
     def log_click_event(self, click_type, item_id):
         
@@ -118,7 +118,7 @@ class LoggerFrontEnd(GeneralLogger):
         format_['item_id'] = item_id
 
         format_ = json.dumps(format_)
-        self.logger.log_struct(json.loads(format_), resource=self.resource)
+        self.logger.log_struct(json.loads(format_))
 
     def log_paginated_view(self, page_num, release_ids):
         
@@ -128,4 +128,4 @@ class LoggerFrontEnd(GeneralLogger):
         format_['release_ids_seen'] = release_ids
         
         format_ = json.dumps(format_)
-        self.logger.log_struct(json.loads(format_), resource=self.resource)
+        self.logger.log_struct(json.loads(format_))
