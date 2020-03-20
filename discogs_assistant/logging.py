@@ -111,11 +111,11 @@ class LoggerFrontEnd(GeneralLogger):
         format_ = json.dumps(format_)
         self.logger.log_struct(json.loads(format_), resource=self.resource)
 
-    def log_click_event(self, click_type, item_id):
+    def log_click_event(self, item_id):
         
         format_ = self._set_base_format()
         format_['event_type'] = 'external_link'
-        format_['click_type'] = click_type
+        # format_['click_type'] = click_type
         format_['item_id'] = item_id
 
         format_ = json.dumps(format_)
