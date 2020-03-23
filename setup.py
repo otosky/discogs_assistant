@@ -4,7 +4,7 @@ setup(
     name='discogs_assistant',
     packages=['discogs_assistant'],
     description='Shared Codebase for Discogs Assistant App',
-    version='0.1',
+    version='0.2',
     url='https://github.com/otosky/discogs_assistant',
     author='Oliver Tosky',
     author_email='olivertosky@gmail.com',

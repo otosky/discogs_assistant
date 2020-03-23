@@ -143,9 +143,12 @@ class CartCandidates:
                 price is below budget threshold. 
 
         '''
-        # get full wantlist
+        # get full wantlist as long as release_id in current Discogs XML dump
         q = '''
-            SELECT release_id FROM wantlist
+            SELECT release_id 
+            FROM wantlist AS w
+            JOIN release AS r
+            ON r.id = w.release_id
             WHERE username=%s
             '''
         
