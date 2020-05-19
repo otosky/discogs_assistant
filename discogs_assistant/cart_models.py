@@ -5,7 +5,7 @@ from tenacity import retry, stop_after_delay, stop_after_attempt
 import pandas as pd
 import numpy as np
 from .utils import connect_psql, publisher_setup
-from .gen_models import Cache
+from .scrape_models import Cache
 
 # Discogs Media Condition Grades
 # Numeric codes used to filter SQL queries

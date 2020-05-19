@@ -1,4 +1,4 @@
-import time, os
+import time, os, pickle
 from bson import json_util
 from math import ceil
 import redis
@@ -8,625 +8,869 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import scipy.sparse as sparse
 from .exceptions import APILimitExceeded
-from .utils import flatten_list, url_to_lxml, make_chunks, MongoCollection
-from .utils import connect_psql, publisher_setup
-from .gen_models import Cache, UserProfileBase, DiscogsScraper, Interactions
+from .utils import flatten_list, url_to_lxml, make_chunks, MongoCollection, \
+                   connect_psql, publisher_setup, BUCKET_NAME, upload_blob, \
+                   get_pickle_directory
+#from .gen_models import Cache, UserProfileBase, DiscogsScraper, Interactions
+from io import BytesIO
 
 MAX_WORKERS = 4
 
-USER_SCRAPE_TOPIC = os.environ.get('USER_SCRAPE_TOPIC')
-USER_API_TOPIC = os.environ.get('USER_API_TOPIC')
-READY_TO_REC_TOPIC = os.environ.get('READY_TO_REC_TOPIC')
+# USER_SCRAPE_TOPIC = os.environ.get('USER_SCRAPE_TOPIC')
+# USER_API_TOPIC = os.environ.get('USER_API_TOPIC')
+# READY_TO_REC_TOPIC = os.environ.get('READY_TO_REC_TOPIC')
 
-class ProfileGatheringDispatcher:
-    '''
-    Wrapper for methods related to gathering a user's wantlist or collection, 
-    either using the Discogs API or web scraping.
-    '''
-    @staticmethod
-    def check_interactions_count_sql(username, interaction_type='wantlist'):
-        '''
-        Fetches count of release ids for a given user and in either their
-        wantlist or collection.
+# class ProfileGatheringDispatcher:
+#     '''
+#     Wrapper for methods related to gathering a user's wantlist or collection, 
+#     either using the Discogs API or web scraping.
+#     '''
+#     @staticmethod
+#     def check_interactions_count_sql(username, interaction_type='wantlist'):
+#         '''
+#         Fetches count of release ids for a given user and in either their
+#         wantlist or collection.
 
-        Args:
-            username (str):
-                Discogs username
-            interaction_type (str):
-                Either "wantlist" or "collection"
+#         Args:
+#             username (str):
+#                 Discogs username
+#             interaction_type (str):
+#                 Either "wantlist" or "collection"
 
-        Returns:
-            int:
-                Number of releases in user's wantlist or collection.
-        '''
+#         Returns:
+#             int:
+#                 Number of releases in user's wantlist or collection.
+#         '''
 
-        q = "SELECT COUNT(*) FROM %s WHERE username=%%s;" % interaction_type
+#         q = "SELECT COUNT(*) FROM %s WHERE username=%%s;" % interaction_type
         
-        with connect_psql() as conn:
-            with conn.cursor() as cur:
-                cur.execute(q, (username,))
-                count = cur.fetchall()[0][0]
-        return int(count)
+#         with connect_psql() as conn:
+#             with conn.cursor() as cur:
+#                 cur.execute(q, (username,))
+#                 count = cur.fetchall()[0][0]
+#         return int(count)
 
-    @staticmethod
-    def trigger_scrapers(chunks, username, n_chunks, interaction, trans_id, online=True):
-        '''
-        Triggers Cloud Function scrapers to extract release ids from User's
-        collection or wantlist urls.  Urls are batched in chunks of size n, if there
-        are multiple pages worth of releases.
+#     @staticmethod
+#     def trigger_scrapers(chunks, username, n_chunks, interaction, trans_id, online=True):
+#         '''
+#         Triggers Cloud Function scrapers to extract release ids from User's
+#         collection or wantlist urls.  Urls are batched in chunks of size n, if there
+#         are multiple pages worth of releases.
 
-        Transaction status cache gets updated upon completion of message publishing.
+#         Transaction status cache gets updated upon completion of message publishing.
 
-        Args:
-            chunks (List of Lists of Integers):
-                Cart candidate release_ids grouped into lists of size N.
-            username (str):
-                Discogs username
-            n_chunks (int):
-                Total number of chunks; this is published in the message and 
-                will be used as a decrement counter later to determine when
-                all chunks have been scraped.
-            interaction (str):
-                Either "wantlist" or "collection"; interaction_type.
-            trans_id (str):
-                22-character Transaction ID for recommendations request.
-        '''
+#         Args:
+#             chunks (List of Lists of Integers):
+#                 Cart candidate release_ids grouped into lists of size N.
+#             username (str):
+#                 Discogs username
+#             n_chunks (int):
+#                 Total number of chunks; this is published in the message and 
+#                 will be used as a decrement counter later to determine when
+#                 all chunks have been scraped.
+#             interaction (str):
+#                 Either "wantlist" or "collection"; interaction_type.
+#             trans_id (str):
+#                 22-character Transaction ID for recommendations request.
+#         '''
 
-        publisher, topic_path = publisher_setup(USER_SCRAPE_TOPIC)
-        # if the list is empty no triggers sent
-        for i in chunks:
-            data = str(list(i))
-            # Data must be a bytestring
-            data = data.encode('utf-8')
-            # When you publish a message, the client returns a future.
-            # kwargs after 'data' get formatted as JSON under 'attributes
-            future = publisher.publish(topic_path, data=data, username=str(username),  
-                                        packet_size=str(n_chunks),
-                                        interaction=str(interaction),
-                                        trans_id=trans_id, status=str(3))
-            print(future.result())
-            print('Published messages.')
-        if online:
-            Cache.update_transaction_status(trans_id, status=str(3))
+#         publisher, topic_path = publisher_setup(USER_SCRAPE_TOPIC)
+#         # if the list is empty no triggers sent
+#         for i in chunks:
+#             data = str(list(i))
+#             # Data must be a bytestring
+#             data = data.encode('utf-8')
+#             # When you publish a message, the client returns a future.
+#             # kwargs after 'data' get formatted as JSON under 'attributes
+#             future = publisher.publish(topic_path, data=data, username=str(username),  
+#                                         packet_size=str(n_chunks),
+#                                         interaction=str(interaction),
+#                                         trans_id=trans_id, status=str(3))
+#             print(future.result())
+#             print('Published messages.')
+#         if online:
+#             Cache.update_transaction_status(trans_id, status=str(3))
     
-    @staticmethod
-    def trigger_api_profile_collection(username, interaction, trans_id):
-        '''
-        Triggers Cloud function to gather User's profile from the Discogs API.
-        This is a necessary operation if the User has set their profile to private.
+#     @staticmethod
+#     def trigger_api_profile_collection(username, interaction, trans_id):
+#         '''
+#         Triggers Cloud function to gather User's profile from the Discogs API.
+#         This is a necessary operation if the User has set their profile to private.
 
-        Args:
-            username (str):
-                Discogs username
-            interaction (str):
-                Either "wantlist" or "collection"; interaction_type.
-            trans_id (str):
-                22-character Transaction ID for recommendations request.
-        '''
+#         Args:
+#             username (str):
+#                 Discogs username
+#             interaction (str):
+#                 Either "wantlist" or "collection"; interaction_type.
+#             trans_id (str):
+#                 22-character Transaction ID for recommendations request.
+#         '''
 
-        publisher, topic_path = publisher_setup(USER_API_TOPIC)
+#         publisher, topic_path = publisher_setup(USER_API_TOPIC)
         
-        # Data must be a bytestring
-        username = username.encode('utf-8')
-        # When you publish a message, the client returns a future.
-        # kwargs after 'data' get formatted as JSON under 'attributes
-        future = publisher.publish(topic_path, data=username,
-                                    interaction=str(interaction),
-                                    trans_id=trans_id, status=str(3))
-        print(future.result())
-        print('Published messages.')
-        Cache.update_transaction_status(trans_id, status=str(3))
+#         # Data must be a bytestring
+#         username = username.encode('utf-8')
+#         # When you publish a message, the client returns a future.
+#         # kwargs after 'data' get formatted as JSON under 'attributes
+#         future = publisher.publish(topic_path, data=username,
+#                                     interaction=str(interaction),
+#                                     trans_id=trans_id, status=str(3))
+#         print(future.result())
+#         print('Published messages.')
+#         Cache.update_transaction_status(trans_id, status=str(3))
 
-    @staticmethod
-    def set_user_packet_size(username, packet_size, expiry=3600):
-        '''
-        Sets total payload size as value for user's recommendation transaction
-        key in Redis.  This will act as a counter for determining when all 
-        packets have been collected.
+#     @staticmethod
+#     def set_user_packet_size(username, packet_size, expiry=3600):
+#         '''
+#         Sets total payload size as value for user's recommendation transaction
+#         key in Redis.  This will act as a counter for determining when all 
+#         packets have been collected.
 
-        Args:
-            username (str):
-                Discogs username
-            packet_size (int):
-                Number of URLs being scraped.
-            expiry (int):
-                Time-to-live for Redis key, in seconds.  Default is 3600 (60 min).
-        '''
-        key = f'{username}:packet_size'
-        redis_conn = redis.Redis()
-        redis_conn.set(key, packet_size, ex=expiry)
-        return None
+#         Args:
+#             username (str):
+#                 Discogs username
+#             packet_size (int):
+#                 Number of URLs being scraped.
+#             expiry (int):
+#                 Time-to-live for Redis key, in seconds.  Default is 3600 (60 min).
+#         '''
+#         key = f'{username}:packet_size'
+#         redis_conn = redis.Redis()
+#         redis_conn.set(key, packet_size, ex=expiry)
+#         return None
 
-    @staticmethod
-    def increment_user_key(key, amount, expiry=None):
-        '''
-        Increments/Decrements User's recommendation transaction Key in Redis.  
-        This acts as a counter for determining when all packets have been collected, 
-        using the number of chunks sent out as Pub-Sub messages.
+#     @staticmethod
+#     def increment_user_key(key, amount, expiry=None):
+#         '''
+#         Increments/Decrements User's recommendation transaction Key in Redis.  
+#         This acts as a counter for determining when all packets have been collected, 
+#         using the number of chunks sent out as Pub-Sub messages.
 
-        Args:
-            key (type):
-                Key correlating to User's recommendation transaction request.
-                Of form: 'username:trans_id:packet_size'.
-            amount (int):
-                Increment amount (can be negative).
-            expiry (int or datetime.datetime.timedelta):
-                Time-to-live for Redis key; optional
-        '''
-        redis_conn = redis.Redis()
-        redis_conn.incrby(key, amount=amount)
-        if expiry:
-            redis_conn.expire(key, expiry)
-        return None
+#         Args:
+#             key (type):
+#                 Key correlating to User's recommendation transaction request.
+#                 Of form: 'username:trans_id:packet_size'.
+#             amount (int):
+#                 Increment amount (can be negative).
+#             expiry (int or datetime.datetime.timedelta):
+#                 Time-to-live for Redis key; optional
+#         '''
+#         redis_conn = redis.Redis()
+#         redis_conn.incrby(key, amount=amount)
+#         if expiry:
+#             redis_conn.expire(key, expiry)
+#         return None
 
-    @staticmethod
-    def check_user_scrape_complete(key):
-        '''
-        Checks to see whether User's profile gathering is complete.
+#     @staticmethod
+#     def check_user_scrape_complete(key):
+#         '''
+#         Checks to see whether User's profile gathering is complete.
 
-        Sees whether user's transaction key has been decremented to 0.
+#         Sees whether user's transaction key has been decremented to 0.
 
-        Args:
-            key (type):
-                Key correlating to User's recommendation transaction request.
-                Of form: 'username:trans_id:packet_size'.
+#         Args:
+#             key (type):
+#                 Key correlating to User's recommendation transaction request.
+#                 Of form: 'username:trans_id:packet_size'.
 
-        Returns:
-            boolean:
-                True if gathering is complete; False if there are still more
-                packets that are scraping.
-        '''
-        redis_conn = redis.Redis()
-        packets_left = redis_conn.get(key)
-        if int(packets_left) <= 0:
-            return True
-        else:
-            return False
+#         Returns:
+#             boolean:
+#                 True if gathering is complete; False if there are still more
+#                 packets that are scraping.
+#         '''
+#         redis_conn = redis.Redis()
+#         packets_left = redis_conn.get(key)
+#         if int(packets_left) <= 0:
+#             return True
+#         else:
+#             return False
 
-    @staticmethod
-    def handoff_to_recalculate_user(username, trans_id):
-        '''
-        Publishes message that indicates User's profile has been fully gathered
-        and that recommendation recalculation is ready to go.
+#     @staticmethod
+#     def handoff_to_recalculate_user(username, trans_id):
+#         '''
+#         Publishes message that indicates User's profile has been fully gathered
+#         and that recommendation recalculation is ready to go.
 
-        Args:
-            username (str):
-                Discogs username
-            trans_id (str):
-                22-character Transaction ID for recommendations request.
-        '''
-        username = username.encode('utf-8')
+#         Args:
+#             username (str):
+#                 Discogs username
+#             trans_id (str):
+#                 22-character Transaction ID for recommendations request.
+#         '''
+#         username = username.encode('utf-8')
         
-        publisher, topic_path = publisher_setup(READY_TO_REC_TOPIC)
-        future = publisher.publish(topic_path, data=username, trans_id=trans_id, status=str(4))
-        print(future.result())
-        Cache.update_transaction_status(trans_id, status=str(4))
-        return None
+#         publisher, topic_path = publisher_setup(READY_TO_REC_TOPIC)
+#         future = publisher.publish(topic_path, data=username, trans_id=trans_id, status=str(4))
+#         print(future.result())
+#         Cache.update_transaction_status(trans_id, status=str(4))
+#         return None
 
-    @classmethod
-    def scrape_extra_urls(cls, profile, trans_id, len_interactions, interaction_type, online=True):
-        '''
-        Generates extra urls for interaction_type to scrape (beyond page 1)
-        and triggers cloud functions to execute scraping.
+#     @classmethod
+#     def scrape_extra_urls(cls, profile, trans_id, len_interactions, interaction_type, online=True):
+#         '''
+#         Generates extra urls for interaction_type to scrape (beyond page 1)
+#         and triggers cloud functions to execute scraping.
 
-        Args:
-            profile (UserProfileBase):
-                UserProfile object for user.
-            trans_id (str):
-                22-character Transaction ID for recommendations request.
-            len_interactions (int):
-                Number of releases in user's wantlist or collection.
-            interaction_type (str):
-                Either "wantlist" or "collection".
+#         Args:
+#             profile (UserProfileBase):
+#                 UserProfile object for user.
+#             trans_id (str):
+#                 22-character Transaction ID for recommendations request.
+#             len_interactions (int):
+#                 Number of releases in user's wantlist or collection.
+#             interaction_type (str):
+#                 Either "wantlist" or "collection".
 
-        Returns:
-            int:
-                Number of triggers (chunks) sent out to scraper functions.
-        '''
-        # create extra wantlist urls for Cloud Function to scrape
-        extra_urls = profile.get_remainder_urls(len_interactions, interaction_type=interaction_type)
-        # chunk list of urls
-        chunks = list(make_chunks(extra_urls, 10))
-        n_chunks = len(chunks)
-        packet_size = n_chunks
-        # publish msg to scrape extra wantlist URLs
-        cls.trigger_scrapers(chunks, profile.username, n_chunks, interaction_type, 
-                             trans_id, online)
-        print('triggering scrapers')
-        return packet_size
+#         Returns:
+#             int:
+#                 Number of triggers (chunks) sent out to scraper functions.
+#         '''
+#         # create extra wantlist urls for Cloud Function to scrape
+#         extra_urls = profile.get_remainder_urls(len_interactions, interaction_type=interaction_type)
+#         # chunk list of urls
+#         chunks = list(make_chunks(extra_urls, 10))
+#         n_chunks = len(chunks)
+#         packet_size = n_chunks
+#         # publish msg to scrape extra wantlist URLs
+#         cls.trigger_scrapers(chunks, profile.username, n_chunks, interaction_type, 
+#                              trans_id, online)
+#         print('triggering scrapers')
+#         return packet_size
 
-    @classmethod
-    def dispatch(cls, username, trans_id, existing=False, interaction_type='wantlist', online=True):
-        '''
-        Dispatch pipeline to gather User's Discogs profile.
+#     @classmethod
+#     def dispatch(cls, username, trans_id, existing=False, interaction_type='wantlist', online=True):
+#         '''
+#         Dispatch pipeline to gather User's Discogs profile.
 
-        - Checks whether User Profile is public or private.
-        - Determines whether our records are up-to-date; 
-        - Hands-off to calculation if up-to-date; triggers scrapers if not.
+#         - Checks whether User Profile is public or private.
+#         - Determines whether our records are up-to-date; 
+#         - Hands-off to calculation if up-to-date; triggers scrapers if not.
 
 
-        Args:
-            username (str):
-                Discogs username
-            trans_id (str):
-                22-character Transaction ID for recommendations request.
-            interaction (str):
-                Either "wantlist" or "collection"; interaction_type.
+#         Args:
+#             username (str):
+#                 Discogs username
+#             trans_id (str):
+#                 22-character Transaction ID for recommendations request.
+#             interaction (str):
+#                 Either "wantlist" or "collection"; interaction_type.
 
-        Returns:
-            int:
-                Number of triggers sent out if scraping interactions;
-                Returns 0 if our database is up-to-date, or 1 if the User's profile
-                is set to private and gathering happens through API.
-        '''
+#         Returns:
+#             int:
+#                 Number of triggers sent out if scraping interactions;
+#                 Returns 0 if our database is up-to-date, or 1 if the User's profile
+#                 is set to private and gathering happens through API.
+#         '''
 
-        profile = UserProfilePublic(username)
+#         profile = UserProfilePublic(username)
 
-        xml_tree = profile.check_if_interactions_private(interaction_type=interaction_type)
-        # if the req came back as 200, then User's profile is public
-        if xml_tree:
-            len_interactions, first250_releases = profile.get_interactions_len(xml_tree)
-            if len_interactions:
-                if online:
-                    # dump to Postgres
-                    profile.dump_interactions_to_SQL(first250_releases, interaction_type=interaction_type)
-                else:
-                    # dump to Postgres
-                    profile.dump_interactions_to_SQL(first250_releases, 
-                                                     interaction_type=interaction_type, 
-                                                     non_user=True)
-                    # TODO if len is > 5000: send msg alerting that this might take a while
+#         xml_tree = profile.check_if_interactions_private(interaction_type=interaction_type)
+#         # if the req came back as 200, then User's profile is public
+#         if xml_tree:
+#             len_interactions, first250_releases = profile.get_interactions_len(xml_tree)
+#             if len_interactions:
+#                 if online:
+#                     # dump to Postgres
+#                     profile.dump_interactions_to_SQL(first250_releases, interaction_type=interaction_type)
+#                 else:
+#                     # dump to Postgres
+#                     profile.dump_interactions_to_SQL(first250_releases, 
+#                                                      interaction_type=interaction_type, 
+#                                                      non_user=True)
+#                     # TODO if len is > 5000: send msg alerting that this might take a while
                 
-                # checks to see if count from our database matches Discogs web
-                if existing:
-                    our_count = cls.check_interactions_count_sql(profile.username, 
-                                                        interaction_type=interaction_type)
-                    # modify length of list to be the diff between our DB and Discogs
-                    if len_interactions > our_count:
-                        len_interactions = len_interactions - our_count
-                        # chunk and trigger scrapers
-                        packet_size = cls.scrape_extra_urls(profile, trans_id, 
-                                                            len_interactions, 
-                                                            interaction_type, online)
-                        return packet_size
-                    else:
-                        # no packets needed
-                        return 0
-                else:
-                    packet_size = cls.scrape_extra_urls(profile, trans_id, 
-                                                    len_interactions, interaction_type, online)
-                    return packet_size
-        # private profile
-        else:
-            # collect via API
-            print('need API')
-            private = UserProfilePrivate(username)
-            client = private.authenticate_as_user()
-            len_interactions = private.get_interaction_count(client, interaction_type)
-            count = cls.check_interactions_count_sql(private.username, 
-                                                        interaction_type=interaction_type)
-            if len_interactions <= count:
-                # no packets needed
-                return 0
-            else:
-                cls.trigger_api_profile_collection(private.username, interaction_type, trans_id)
-                return 1
-        # fail-safe catchall
-        return 0
+#                 # checks to see if count from our database matches Discogs web
+#                 if existing:
+#                     our_count = cls.check_interactions_count_sql(profile.username, 
+#                                                         interaction_type=interaction_type)
+#                     # modify length of list to be the diff between our DB and Discogs
+#                     if len_interactions > our_count:
+#                         len_interactions = len_interactions - our_count
+#                         # chunk and trigger scrapers
+#                         packet_size = cls.scrape_extra_urls(profile, trans_id, 
+#                                                             len_interactions, 
+#                                                             interaction_type, online)
+#                         return packet_size
+#                     else:
+#                         # no packets needed
+#                         return 0
+#                 else:
+#                     packet_size = cls.scrape_extra_urls(profile, trans_id, 
+#                                                     len_interactions, interaction_type, online)
+#                     return packet_size
+#         # private profile
+#         else:
+#             # collect via API
+#             print('need API')
+#             private = UserProfilePrivate(username)
+#             client = private.authenticate_as_user()
+#             len_interactions = private.get_interaction_count(client, interaction_type)
+#             count = cls.check_interactions_count_sql(private.username, 
+#                                                         interaction_type=interaction_type)
+#             if len_interactions <= count:
+#                 # no packets needed
+#                 return 0
+#             else:
+#                 cls.trigger_api_profile_collection(private.username, interaction_type, trans_id)
+#                 return 1
+#         # fail-safe catchall
+#         return 0
 
-class UserProfilePublic(UserProfileBase):
+# class UserProfilePublic(UserProfileBase):
+#     '''
+#     User with a publicly visible Interaction Type (Wantlist or Collection).
+
+#     Args:
+#         username (str):
+#             Discogs username
+
+#     Attributes:
+#         username (str):
+#             Discogs username
+#         p_lim (int):
+#             Number of releases to include per page in Discogs wantlist/collection 
+#             GET requests.
+#         wantlist_start_url (str):
+#             Base URL (page 1) for fetching User's wantlist release_ids.
+#         collection_start_url (str):
+#             Base URL (page 2) for fetching User's collection release_ids.
+#         private (list):
+#             List of interaction types that User has set to private.
+#     '''
+#     def __init__(self, username):
+#         super().__init__(username)
+#         self.wantlist_start_url = f'https://www.discogs.com/wantlist?page=1&limit={self.p_lim}&user={self.username}'
+#         self.collection_start_url = f'https://www.discogs.com/user/{self.username}/collection?page=1&limit={self.p_lim}'
+#         self.private = []
+    
+#     def check_if_interactions_private(self, interaction_type='wantlist'):
+#         '''
+#         Tries to scrape first page of User's wantlist or collection to determine
+#         whether that particular interaction type is public or private.
+
+#         Args:
+#             interaction_type (str):
+#                 Either "wantlist" or "collection".
+
+#         Returns:
+#             lxml.etree._ElementTree:
+#                 XPath-parseable element tree of User's wantlist or collection
+#                 from url_to_lxml function if interactions set public.
+#                 Returns None if interactions have been set private.
+#         '''
+#         if interaction_type == 'wantlist':
+#             start_url = self.wantlist_start_url
+#         elif interaction_type == 'collection':
+#             start_url = self.collection_start_url
+#         else:
+#             raise TypeError
+
+#         tree = url_to_lxml(start_url)
+        
+#         if not tree:
+#             self.private += [interaction_type]
+
+#         return tree
+
+#     def get_interactions_len(self, tree):
+#         '''
+#         Parses lxml tree to get first 250 release ids from page and total
+#         number of releases for given interaction type.
+
+#         Args:
+#             tree (lxml.etree._ElementTree):
+#                 XPath-parseable element tree of User's wantlist or collection
+#                 from url_to_lxml function.
+
+#         Returns:
+#             tuple:
+#                 Total number of releases in User's wantlist/collection,
+#                 first 250 release ids for User's wantlist/collection.
+#         '''
+#         len_interactions, first250_releases = DiscogsScraper.parse_releases_interactions(tree)
+#         return len_interactions, first250_releases
+    
+#     def get_remainder_urls(self, len_interactions, interaction_type='wantlist'):
+#         '''
+#         Creates a list of the remaining page URLs to scrape in order to gather
+#         all of User's wantlist or collection releases.
+
+#         - Takes the total number of interaction items.
+#         - Divides that count by 250 (items per page).
+#         - Creates a list of urls by replacing the "page=" param of the 
+#           URL with range of page numbers needed to cover full span of items.
+
+#         Args:
+#             len_interaction (int):
+#                 Total number of releases in User's wantlist/collection
+#             interaction_type (str):
+#                 Either "wantlist" or "collection".
+
+#         Returns:
+#             list:
+#                 List of URLs that will fetch all pages in a User's wantlist/collection
+#                 on Discogs.com
+#         '''
+#         if interaction_type == 'wantlist':
+#             base_url = self.wantlist_start_url
+#         elif interaction_type == 'collection':
+#             base_url = self.collection_start_url
+#         else:
+#             raise TypeError
+        
+#         num_pages = ceil(len_interactions / 250)
+#         pages = range(2, num_pages + 1)
+#         urls = [base_url.replace('page=1', f'page={p}') for p in pages]
+#         return urls
+    
+#     # def dump_interactions_to_SQL(self, release_ids, interaction_type='wantlist'):
+#     #     if interaction_type not in ['wantlist', 'collection']:
+#     #         raise TypeError
+#     #     today = datetime.utcnow().date()
+#     #     insert_values = [(r, self.username, today) for r in release_ids]
+#     #     q = 'INSERT INTO %s (release_id, username, scraped) VALUES %%s ON CONFLICT DO NOTHING;' % interaction_type
+
+#     #     with connect_psql() as conn:
+#     #         with conn.cursor() as cur:
+#     #             execute_values(cur, q, insert_values)
+#     #     conn.close()
+
+# class UserProfilePrivate(UserProfileBase):
+#     '''
+#     User with a private Interaction Type (Wantlist or Collection).
+#     These interactions are only retrievable via authenticated Discogs API calls.
+
+#     Args:
+#         username (str):
+#             Discogs username
+
+#     Attributes:
+#         username (str):
+#             Discogs username
+#         p_lim (int):
+#             Number of releases to include per page in Discogs wantlist/collection 
+#             GET requests.
+#         wantlist (list):
+#             List of release ids (integers) in User's wantlist.
+#         collection (list):
+#             List of release ids (integers) in User's collection.
+#     '''
+#     def __init__(self, username):
+#         super().__init__(username)
+    
+#     def _make_api_request_for_page(self, client, page_num, interaction_type='wantlist'):
+#         '''
+#         Formats url and makes GET request to Discogs API to fetch page of paginated 
+#         wantlist/collection for user.
+
+#         Args:
+#             client (discogs_client.Client):
+#                 Authenticated Discogs API Client for user.
+#             page_num (int):
+#                 Page number to make paginated API GET request for.
+#             interaction_type (str):
+#                 Either "wantlist" or "collection".
+
+#         Returns:
+#             dict:
+#                 JSON Discogs API response as dictionary.
+#         '''
+#         base_url = f'https://api.discogs.com/users/{self.username}'
+#         if interaction_type == 'wantlist':
+#             base_url = f'{base_url}/wants'
+#         elif interaction_type == 'collection':
+#             base_url = f'{base_url}/collection/folders/0/releases'
+#         else:
+#             raise ValueError("'interaction_type' must be either 'wantlist' or 'collection'")
+        
+#         url_suffix = f'?page={page_num}&per_page=250'
+#         res = client._request('GET', f'{base_url}{url_suffix}')
+        
+#         return res
+        
+#     def _extract_release_ids(self, json, interaction_type='wantlist'):
+#         '''
+#         Parses release ids from json API response for a User's wantlist or collection.
+
+#         Args:
+#             param (type):
+#                 Explanation
+#             interaction_type (str):
+#                 Either "wantlist" or "collection".
+
+#         Returns:
+#             list:
+#                 List of release ids (integers) in User's wantlist or collection.
+#         '''
+#         if interaction_type == 'wantlist':
+#             interaction_key = 'wants'
+#         elif interaction_type == 'collection':
+#             interaction_key = 'releases'
+#         else:
+#             raise ValueError("'interaction_type' must be either 'wantlist' or 'collection'")
+        
+#         release_ids = [item['id'] for item in json[interaction_key]]
+        
+#         return [release_ids]
+    
+#     def _get_interaction_items(self, client, page=1, interaction_type='wantlist'):
+#         '''
+#         Helper function that extracts release ids for a paginated Discogs API 
+#         GET request retrieving either wantlist or collection items, and also returns
+#         the total number of pages.
+
+#         Args:
+#             client (discogs_client.Client):
+#                 Authenticated Discogs API Client for user.
+#             page (int):
+#                 Page number to make paginated API GET request for.
+#                 Default = 1
+#             interaction_type (str):
+#                 Either "wantlist" or "collection".
+
+#         Returns:
+#             tuple:
+#                 Release ids in page for User's wantlist or collection, 
+#                 and number of pages total in User's wantlist or collection.
+#         '''
+#         json = self._make_api_request_for_page(client, page, interaction_type)
+#         release_ids = self._extract_release_ids(json, interaction_type)
+#         num_pages = json['pagination']['pages']
+        
+#         return release_ids, num_pages
+    
+#     def _multithread_interaction_collection(self, client, interaction_type, max_workers=MAX_WORKERS):
+#         '''
+#         Multithreaded pipeline to gather all release ids from a User's particular
+#         interaction type (wantlist or collection).
+
+#         - Makes a primary GET request to retrieve first 250 release ids and 
+#           total number of pages.
+#         - If there are more pages to collect, will make GET requests with 
+#           n-multithreaded workers to subsequent pages.
+#         - Flattens all lists of release ids - each page generates a list -
+#           to a final list of all release ids for that interaction_type.
+
+#         Args:
+#             client (discogs_client.Client):
+#                 Authenticated Discogs API Client for user.
+#             interaction_type (str):
+#                 Either "wantlist" or "collection".
+#             max_workers (int):
+#                 Number of threads to feed concurrent_futures.ThreadPoolExecutor
+        
+#         Returns:
+#             list:
+#                 All release ids in a User's wantlist or collection, in a flattened list.
+#         '''
+#         release_ids, num_pages = self._get_interaction_items(client, interaction_type=interaction_type)
+#         if num_pages > 120:
+#             excessive = APILimitExceeded()
+#             return excessive
+            
+#             # need to return some object that will trigger an different workflow
+#             # cuz I don't want to bother with using these functions for more 
+#             # than 30,000 items; if someone has a wantlist/collection size that 
+#             # large then they gotta just make it public temporarily
+#         gen = ((client, page, interaction_type) for page in range(2, num_pages + 1))
+#         with ThreadPoolExecutor(max_workers=max_workers) as executor:
+#             results = executor.map(self._get_interaction_items, *zip(*gen))
+#             results = [i[0] for i in results]
+#             results = flatten_list(results)
+        
+#         release_ids += results
+#         release_ids = flatten_list(release_ids)
+        
+#         return release_ids
+    
+#     def get_interaction_count(self, client, interaction_type='wantlist'):
+#         '''
+#         Retrieves number of items in wantlist or collection for User via Discogs
+#         API.
+
+#         Args:
+#             client (discogs_client.Client:
+#                 Authenticated Discogs API Client for user.
+#             interaction_type (str):
+#                 Either "wantlist" or "collection".
+
+#         Returns:
+#             int:
+#                 Number of items in wantlist or collection for User.
+#         '''
+#         user = client.identity()
+#         if interaction_type == 'wantlist':
+#             return user.num_wantlist
+#         elif interaction_type == 'collection':
+#             return user.num_collection
+#         else:
+#             raise TypeError("Param 'interaction_type' must be 'wantlist' or 'collection'")
+
+#     def get_wantlist_items(self, client):
+#         '''
+#         Helper method to execute interaction_collection via multithreading
+#         for a User's wantlist.
+
+#         Args:
+#             client (discogs_client.Client:
+#                 Authenticated Discogs API Client for user.
+#         '''
+#         self.wantlist = self._multithread_interaction_collection(client, 'wantlist')
+#         return None
+
+#     def get_collection_items(self, client):
+#         '''
+#         Helper method to execute interaction_collection via multithreading
+#         for a User's collection.
+
+#         Args:
+#             client (discogs_client.Client:
+#                 Authenticated Discogs API Client for user.
+#         '''
+#         self.collection = self._multithread_interaction_collection(client, 'collection')
+#         return None
+
+class Interactions:
     '''
-    User with a publicly visible Interaction Type (Wantlist or Collection).
-
-    Args:
-        username (str):
-            Discogs username
+    Wrapper class for functions related to getting User interactions, 
+    release metadata, and creating/saving sparse interaction input-matrices. 
 
     Attributes:
-        username (str):
-            Discogs username
-        p_lim (int):
-            Number of releases to include per page in Discogs wantlist/collection 
-            GET requests.
-        wantlist_start_url (str):
-            Base URL (page 1) for fetching User's wantlist release_ids.
-        collection_start_url (str):
-            Base URL (page 2) for fetching User's collection release_ids.
-        private (list):
-            List of interaction types that User has set to private.
+        timestamp (datetime.datetime):
+            Timestamp of object instantiation.
+            Used as part of filename when saving input_matrix to Storage bucket.
+        interactions_df (pandas.Dataframe):
+            DataFrame of all interactions for all users.  
+            Has columns: release_id - Discogs release_id
+                         release_idx - Category code for "release_id"
+                         username - Discogs username
+                         user_id - Category code for "username"
+            Used as input to matrix factorization model after conversion to sparse matrix.
+        release_id_map (pandas.DataFrame):
+            Reduced dataframe from interactions_df; maps "release_id" to "release_idx".
+        sparse_item_user (scipy.sparse.csr_matrix):
+            A sparse matrix version of interactions_df DataFrame where rows are
+            "user_id", columns are "release_idx", and values are confidence value
+            weighted scores for release.
     '''
-    def __init__(self, username):
-        super().__init__(username)
-        self.wantlist_start_url = f'https://www.discogs.com/wantlist?page=1&limit={self.p_lim}&user={self.username}'
-        self.collection_start_url = f'https://www.discogs.com/user/{self.username}/collection?page=1&limit={self.p_lim}'
-        self.private = []
+    def __init__(self):
+        # set UTC timestamp for filenaming later
+        self.timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H%M")
     
-    def check_if_interactions_private(self, interaction_type='wantlist'):
+    @staticmethod
+    def get_user_interactions(username):
         '''
-        Tries to scrape first page of User's wantlist or collection to determine
-        whether that particular interaction type is public or private.
+        Fetches a single user's Wantlist and Collection release_ids from database.
 
         Args:
-            interaction_type (str):
-                Either "wantlist" or "collection".
-
-        Returns:
-            lxml.etree._ElementTree:
-                XPath-parseable element tree of User's wantlist or collection
-                from url_to_lxml function if interactions set public.
-                Returns None if interactions have been set private.
-        '''
-        if interaction_type == 'wantlist':
-            start_url = self.wantlist_start_url
-        elif interaction_type == 'collection':
-            start_url = self.collection_start_url
-        else:
-            raise TypeError
-
-        tree = url_to_lxml(start_url)
-        
-        if not tree:
-            self.private += [interaction_type]
-
-        return tree
-
-    def get_interactions_len(self, tree):
-        '''
-        Parses lxml tree to get first 250 release ids from page and total
-        number of releases for given interaction type.
-
-        Args:
-            tree (lxml.etree._ElementTree):
-                XPath-parseable element tree of User's wantlist or collection
-                from url_to_lxml function.
+            username (str):
+                User to fetch interactions for.
 
         Returns:
             tuple:
-                Total number of releases in User's wantlist/collection,
-                first 250 release ids for User's wantlist/collection.
+                Both Wantlist DataFrame and Collection DataFrame as a tuple.
         '''
-        len_interactions, first250_releases = DiscogsScraper.parse_releases_interactions(tree)
-        return len_interactions, first250_releases
-    
-    def get_remainder_urls(self, len_interactions, interaction_type='wantlist'):
+        # fetch wantlist and assign score 1 to each release
+        q1 = '''
+            SELECT w.release_id, username, artist_id, label
+            FROM wantlist w
+            JOIN release_artist ra
+                ON ra.release_id = w.release_id
+            JOIN release_label rl
+                ON rl.release_id = w.release_id
+            WHERE username=%s;
+            '''
+
+        # fetch collection and assign score 2 to each release
+        q2 = '''
+            SELECT c.release_id, username, artist_id, label
+            FROM collection c
+            JOIN release_artist ra
+                ON ra.release_id = c.release_id
+            JOIN release_label rl
+                ON rl.release_id = c.release_id
+            WHERE username=%s;
+            '''
+        with connect_psql() as conn:
+            wantlist = pd.read_sql_query(q1, conn, params=[username])
+            wantlist['score'] = 1
+            collection = pd.read_sql_query(q2, conn, params=[username])
+            collection['score'] = 2
+        conn.close()
+
+        return wantlist, collection
+
+    @staticmethod
+    def get_interactions_metadata(release_ids):
         '''
-        Creates a list of the remaining page URLs to scrape in order to gather
-        all of User's wantlist or collection releases.
-
-        - Takes the total number of interaction items.
-        - Divides that count by 250 (items per page).
-        - Creates a list of urls by replacing the "page=" param of the 
-          URL with range of page numbers needed to cover full span of items.
-
+        Builds dataframe of all releases used to train model with full 
+        release metadata.
+        
         Args:
-            len_interaction (int):
-                Total number of releases in User's wantlist/collection
-            interaction_type (str):
-                Either "wantlist" or "collection".
+            release_ids (list):
+                All release_ids (integers) to be input to recommendation model.
 
         Returns:
-            list:
-                List of URLs that will fetch all pages in a User's wantlist/collection
-                on Discogs.com
+            pandas.DataFrame:
+                All release_ids input to recommendation model with associated metatdata.
+                Columns: "release_id"   - int, 
+                         "image_file"   - str, 
+                         "artist_id"    - int, 
+                         "artist (name)"- str, 
+                         "title"        - str,
+                         "record label" - str, 
+                         "genres"       - list of str, 
+                         "styles"       - list of str
         '''
-        if interaction_type == 'wantlist':
-            base_url = self.wantlist_start_url
-        elif interaction_type == 'collection':
-            base_url = self.collection_start_url
-        else:
-            raise TypeError
         
-        num_pages = ceil(len_interactions / 250)
-        pages = range(2, num_pages + 1)
-        urls = [base_url.replace('page=1', f'page={p}') for p in pages]
-        return urls
-    
-    # def dump_interactions_to_SQL(self, release_ids, interaction_type='wantlist'):
-    #     if interaction_type not in ['wantlist', 'collection']:
-    #         raise TypeError
-    #     today = datetime.utcnow().date()
-    #     insert_values = [(r, self.username, today) for r in release_ids]
-    #     q = 'INSERT INTO %s (release_id, username, scraped) VALUES %%s ON CONFLICT DO NOTHING;' % interaction_type
+        q = '''
+            SELECT r.id release_id, im.filename image_file, artist_id, 
+                a.name artist, title, label, genres, styles
+            FROM release r
+            LEFT JOIN image_map im
+                ON im.release_id = r.id
+            JOIN release_artist ra
+                ON ra.release_id = r.id
+            JOIN release_label rl
+                ON rl.release_id = r.id
+            LEFT JOIN artist a
+                ON a.id = ra.artist_id
+            WHERE r.id IN %s;
+            '''
+        params = (tuple(release_ids),)
+        with connect_psql() as conn:
+            metadata = pd.read_sql_query(q, conn, params=params)
+        conn.close()
+        
+        metadata = metadata.sort_values('release_id').reset_index(drop=True)
+        return metadata
 
-    #     with connect_psql() as conn:
-    #         with conn.cursor() as cur:
-    #             execute_values(cur, q, insert_values)
-    #     conn.close()
-
-class UserProfilePrivate(UserProfileBase):
-    '''
-    User with a private Interaction Type (Wantlist or Collection).
-    These interactions are only retrievable via authenticated Discogs API calls.
-
-    Args:
-        username (str):
-            Discogs username
-
-    Attributes:
-        username (str):
-            Discogs username
-        p_lim (int):
-            Number of releases to include per page in Discogs wantlist/collection 
-            GET requests.
-        wantlist (list):
-            List of release ids (integers) in User's wantlist.
-        collection (list):
-            List of release ids (integers) in User's collection.
-    '''
-    def __init__(self, username):
-        super().__init__(username)
-    
-    def _make_api_request_for_page(self, client, page_num, interaction_type='wantlist'):
+    @staticmethod
+    def create_all_interactions_df(metadata_df, release_id_map):
         '''
-        Formats url and makes GET request to Discogs API to fetch page of paginated 
-        wantlist/collection for user.
+        Merges DataFrame of metadata with dataframe that maps release_ids to release_idx.
+        
+        This creates a DataFrame of all the metadata for all releases input to
+        recommendation model, to be used when storing all metadata for user
+        recommendations.
 
         Args:
-            client (discogs_client.Client):
-                Authenticated Discogs API Client for user.
-            page_num (int):
-                Page number to make paginated API GET request for.
-            interaction_type (str):
-                Either "wantlist" or "collection".
+            metadata_df (pandas.DataFrame):
+                DataFrame of metadata for all release_ids input to matrix
+                factorization model.
+            release_id_map (pandas.DataFrame):
+                DataFrame that maps release_id to release_idx category codes.
 
         Returns:
-            dict:
-                JSON Discogs API response as dictionary.
+            tuple:
+                DataFrame of all interactions with metadata & a reduced DataFrame
+                of the same where the release_idx column has been deduplicated.
+
+                The former DataFrame will have duplicates for release_id and release_idx 
+                since the joins from the metadata will sometimes show a release
+                having two (or more) separate artists.  The dedupe DataFrame allows
+                for faster hash indexing when filtering for each individual user's 
+                recommendation metadata.
         '''
-        base_url = f'https://api.discogs.com/users/{self.username}'
-        if interaction_type == 'wantlist':
-            base_url = f'{base_url}/wants'
-        elif interaction_type == 'collection':
-            base_url = f'{base_url}/collection/folders/0/releases'
-        else:
-            raise ValueError("'interaction_type' must be either 'wantlist' or 'collection'")
+        all_interactions = metadata_df.merge(release_id_map)
+        all_interactions_dedupe = all_interactions.drop_duplicates('release_idx').set_index('release_idx')
         
-        url_suffix = f'?page={page_num}&per_page=250'
-        res = client._request('GET', f'{base_url}{url_suffix}')
-        
-        return res
-        
-    def _extract_release_ids(self, json, interaction_type='wantlist'):
+        return all_interactions, all_interactions_dedupe
+
+    def create_df_interactions(self, psql_conn=None):
+        # TODO remove psql_conn param in affected code
+        # TODO optimize this - queries are WAY slow; maybe move to Parquet
         '''
-        Parses release ids from json API response for a User's wantlist or collection.
+        Fetches a all users' Wantlist and Collection release_ids from database. 
+        
+        Formats DataFrame so that Wantlist & Collection receive different
+        weight scores and username/release_id are converted to category codes - 
+        a necessary step before converting to csr_matrix for ALS model.
+        '''
+        
+        with connect_psql() as conn:
+            # gather all users' wantlists, assign each a score of 1
+            q = '''
+            SELECT release_id, username 
+            FROM wantlist
+            UNION
+            SELECT release_id, username
+            FROM non_user_wantlist;
+            '''
+            wantlists = pd.read_sql_query(q, conn)
+            wantlists['score'] = 1
+            # gather all users' collection, assign each a score of 2
+            q = '''
+            SELECT release_id, username 
+            FROM collection
+            UNION
+            SELECT release_id, username
+            FROM non_user_collection;'''
+            collection = pd.read_sql_query(q, conn)
+            collection['score'] = 2
+        conn.close()
+        
+        # combine wantlist + collection dataframes
+        data = pd.concat([wantlists, collection], ignore_index=True)
+        
+        # map user_id and release_idx category codes 
+        data['username'] = data['username'].astype("category")
+        data['release_id'] = data['release_id'].astype("category")
+        data['user_id'] = data['username'].cat.codes
+        data['release_idx'] = data['release_id'].cat.codes
+        self.interactions_df = data
+        
+        # creates reduced dataframe that maps release_id to release_idx codes
+        release_id_map = data.drop_duplicates(subset='release_id')\
+                             .drop(columns=['username', 'user_id', 'score'])
+        self.release_id_map = release_id_map
+    
+    def create_sparse(self):
+        '''
+        Converts DataFrame of all user interactions to a sparse csr_matrix.
+
+        Depends upon running create_df_interactions method first.
+        '''
+        # builds sparse matrix
+        sparse_item_user = sparse.csr_matrix((self.interactions_df.score, 
+                                             (self.interactions_df.release_idx, 
+                                              self.interactions_df.user_id)))
+        self.sparse_item_user = sparse_item_user
+
+    def save_data(self):
+        '''
+        Saves Interactions object to local pickle file and to input-matrix bucket
+        in GCP Storage.
+
+        Necessary to have the object stored externally so that other micro-services
+        can access it alongside the most recent ALS model.
+        '''
+        
+        pickle_directory = get_pickle_directory()
+        
+        # dumps object to pickle
+        filename = ''.join(['data_', self.timestamp, '.pkl'])
+        full_path = ''.join([pickle_directory, filename])
+        pickle.dump(self, open(full_path, 'wb'))
+        
+        # dumps object to GCP Storage bucket
+        tmp = BytesIO()
+        pickle.dump(self, tmp)
+        upload_blob(BUCKET_NAME, f'input-matrix/{filename}', tmp)
+    
+    def load_data(self, filename):
+        '''
+        Placeholder
 
         Args:
             param (type):
                 Explanation
-            interaction_type (str):
-                Either "wantlist" or "collection".
 
         Returns:
-            list:
-                List of release ids (integers) in User's wantlist or collection.
+            datatype:
+                Explanation
         '''
-        if interaction_type == 'wantlist':
-            interaction_key = 'wants'
-        elif interaction_type == 'collection':
-            interaction_key = 'releases'
-        else:
-            raise ValueError("'interaction_type' must be either 'wantlist' or 'collection'")
-        
-        release_ids = [item['id'] for item in json[interaction_key]]
-        
-        return [release_ids]
-    
-    def _get_interaction_items(self, client, page=1, interaction_type='wantlist'):
-        '''
-        Helper function that extracts release ids for a paginated Discogs API 
-        GET request retrieving either wantlist or collection items, and also returns
-        the total number of pages.
-
-        Args:
-            client (discogs_client.Client):
-                Authenticated Discogs API Client for user.
-            page (int):
-                Page number to make paginated API GET request for.
-                Default = 1
-            interaction_type (str):
-                Either "wantlist" or "collection".
-
-        Returns:
-            tuple:
-                Release ids in page for User's wantlist or collection, 
-                and number of pages total in User's wantlist or collection.
-        '''
-        json = self._make_api_request_for_page(client, page, interaction_type)
-        release_ids = self._extract_release_ids(json, interaction_type)
-        num_pages = json['pagination']['pages']
-        
-        return release_ids, num_pages
-    
-    def _multithread_interaction_collection(self, client, interaction_type, max_workers=MAX_WORKERS):
-        '''
-        Multithreaded pipeline to gather all release ids from a User's particular
-        interaction type (wantlist or collection).
-
-        - Makes a primary GET request to retrieve first 250 release ids and 
-          total number of pages.
-        - If there are more pages to collect, will make GET requests with 
-          n-multithreaded workers to subsequent pages.
-        - Flattens all lists of release ids - each page generates a list -
-          to a final list of all release ids for that interaction_type.
-
-        Args:
-            client (discogs_client.Client):
-                Authenticated Discogs API Client for user.
-            interaction_type (str):
-                Either "wantlist" or "collection".
-            max_workers (int):
-                Number of threads to feed concurrent_futures.ThreadPoolExecutor
-        
-        Returns:
-            list:
-                All release ids in a User's wantlist or collection, in a flattened list.
-        '''
-        release_ids, num_pages = self._get_interaction_items(client, interaction_type=interaction_type)
-        if num_pages > 120:
-            excessive = APILimitExceeded()
-            return excessive
-            
-            # need to return some object that will trigger an different workflow
-            # cuz I don't want to bother with using these functions for more 
-            # than 30,000 items; if someone has a wantlist/collection size that 
-            # large then they gotta just make it public temporarily
-        gen = ((client, page, interaction_type) for page in range(2, num_pages + 1))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = executor.map(self._get_interaction_items, *zip(*gen))
-            results = [i[0] for i in results]
-            results = flatten_list(results)
-        
-        release_ids += results
-        release_ids = flatten_list(release_ids)
-        
-        return release_ids
-    
-    def get_interaction_count(self, client, interaction_type='wantlist'):
-        '''
-        Retrieves number of items in wantlist or collection for User via Discogs
-        API.
-
-        Args:
-            client (discogs_client.Client:
-                Authenticated Discogs API Client for user.
-            interaction_type (str):
-                Either "wantlist" or "collection".
-
-        Returns:
-            int:
-                Number of items in wantlist or collection for User.
-        '''
-        user = client.identity()
-        if interaction_type == 'wantlist':
-            return user.num_wantlist
-        elif interaction_type == 'collection':
-            return user.num_collection
-        else:
-            raise TypeError("Param 'interaction_type' must be 'wantlist' or 'collection'")
-
-    def get_wantlist_items(self, client):
-        '''
-        Helper method to execute interaction_collection via multithreading
-        for a User's wantlist.
-
-        Args:
-            client (discogs_client.Client:
-                Authenticated Discogs API Client for user.
-        '''
-        self.wantlist = self._multithread_interaction_collection(client, 'wantlist')
-        return None
-
-    def get_collection_items(self, client):
-        '''
-        Helper method to execute interaction_collection via multithreading
-        for a User's collection.
-
-        Args:
-            client (discogs_client.Client:
-                Authenticated Discogs API Client for user.
-        '''
-        self.collection = self._multithread_interaction_collection(client, 'collection')
-        return None
+        pass
 
 class TrainingUser:
     '''

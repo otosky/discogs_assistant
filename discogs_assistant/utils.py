@@ -9,6 +9,7 @@ import requests
 import lxml.html
 from itertools import chain
 from google.cloud import storage
+import redis
 
 GCP_PROJECT_ID = os.environ.get('GCP_PROJECT_NAME')
 BUCKET_NAME = os.environ.get('RECOMMENDATION_MODEL_BUCKET')
@@ -241,3 +242,38 @@ def download_blob(bucket_name, source_blob_name, destination_file_name):
     blob = bucket.blob(source_blob_name)
 
     blob.download_to_filename(destination_file_name)
+
+class Cache:
+    '''
+    Wrapper class for functions related to updating transaction status for
+    recommendation or cart requests in cache on private Redis server.
+    '''
+
+    @staticmethod
+    def connect_app_cache():
+        '''
+        Connects to Redis instance serving as the status-update cache.
+
+        Returns:
+            redis.Redis connection object 
+        '''
+        redis_host = os.environ['REDIS_HOST']
+        redis_pwd = os.environ['REDIS_PWD']
+        return redis.Redis(host=redis_host, password=redis_pwd)
+
+    @classmethod
+    def update_transaction_status(cls, trans_id, status):
+        '''
+        Updates transaction status for a given transaction_id in Redis cache.
+
+        Args:
+            trans_id (str):
+                22-character Transaction ID for cart request.
+            status (str):
+                Status code integer in string format.
+
+        '''
+        r = cls.connect_app_cache()
+        r.set(trans_id, status)
+        r.connection_pool.disconnect()
+        return None
